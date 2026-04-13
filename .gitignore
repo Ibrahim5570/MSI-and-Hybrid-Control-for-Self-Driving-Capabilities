@@ -1,0 +1,9 @@
+# Ignore the uncompressed video folder
+DIP Project Videos/
+
+# Ignore the compressed zip file
+DIP Project Videos.zip
+
+# Ignore the Opera GX/PDF document
+CEP DIP Project Spring 2026.html
+CEP DIP Project Spring 2026.pdf
