@@ -1,6 +1,7 @@
 # Ignore the uncompressed video folder
 DIP Project Videos/
-
+output_videos/
+.idea/
 # Ignore the compressed zip file
 DIP Project Videos.zip
 
