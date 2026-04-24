@@ -14,7 +14,6 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 CLOSE_THRESHOLD_HEIGHT_RATIO = 0.45
 LANE_OFFSET_THRESHOLD        = 40
 
-
 # YOLO PIPELINE (Thread 1)
 
 model = YOLO('yolov8n.pt')
@@ -36,7 +35,7 @@ def run_yolo_pipeline(frame):
                 obj_width  = x2 - x1
                 obj_height = y2 - y1
 
-                # FIX 2: Pole person filter restored — rejects lamp posts / thin verticals
+                # Reject pole-shaped false positives labelled as "person"
                 if class_name == 'person' and (obj_width / (obj_height + 1e-5)) < 0.20:
                     continue
 
@@ -53,11 +52,9 @@ def run_yolo_pipeline(frame):
 
     return detections
 
-
 # CLASSICAL CV PIPELINE (Thread 2)
 
 def run_classical_pipeline(frame, needs_darkening):
-    # FIX 1: exposure flag passed in from main loop (checked every 15 frames there)
     img    = frame.copy()
     height, width = img.shape[:2]
 
@@ -97,6 +94,7 @@ def run_classical_pipeline(frame, needs_darkening):
         angles = np.abs(np.arctan2(lines[:, 3] - lines[:, 1],
                                    lines[:, 2] - lines[:, 0]) * 180.0 / np.pi)
         valid  = lines[(angles < 25) | (angles > 155)]
+        valid = valid[valid[:, 1] < int(height * 0.65)]
         if len(valid) > 0:
             barrier_detected, barrier_line = True, valid[0]
 
@@ -104,79 +102,227 @@ def run_classical_pipeline(frame, needs_darkening):
 
 # LANE DETECTION PIPELINE (Thread 3)
 
+# --- Global state for lane smoothing and adaptive ROI ---
+# Kept as module-level variables as per Ayesha's design.
+# _reset_lane_state() is called between videos to prevent bleed-over.
+
+_prev_left_fit_avg  = None
+_prev_right_fit_avg = None
+_roi_state          = None
+
+
+def _reset_lane_state():
+    """Call between videos to clear smoothing and ROI state."""
+    global _prev_left_fit_avg, _prev_right_fit_avg, _roi_state
+    _prev_left_fit_avg  = None
+    _prev_right_fit_avg = None
+    _roi_state          = None
+
+
+def _canny(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    return cv2.Canny(blur, 70, 170)
+
+
+def _adaptive_roi_cca(edge_image, original_shape):
+    """
+    Ayesha's CCA-based adaptive ROI.
+    Finds edge components on left/right sides and builds a trapezoid around them.
+    Downscales 4x for performance, then smooths coordinates over time.
+    """
+    global _roi_state
+    h, w = original_shape[:2]
+
+    scale       = 4
+    small_edge  = cv2.resize(edge_image, (w // scale, h // scale))
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(small_edge, connectivity=8)
+
+    left_coords  = []
+    right_coords = []
+
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < (50 // scale):
+            continue
+        x     = stats[i, cv2.CC_STAT_LEFT]  * scale
+        width = stats[i, cv2.CC_STAT_WIDTH]  * scale
+        if x < w // 2:
+            left_coords.append(x)
+        else:
+            right_coords.append(x + width)
+
+    target_left  = min(left_coords)  if left_coords  else int(w * 0.1)
+    target_right = max(right_coords) if right_coords else int(w * 0.9)
+
+    target_state = [
+        target_left,
+        target_right,
+        target_left  + int(w * 0.15),
+        target_right - int(w * 0.15)
+    ]
+
+    if _roi_state is None:
+        _roi_state = target_state
+    else:
+        _roi_state = [int(0.9 * c + 0.1 * t) for c, t in zip(_roi_state, target_state)]
+
+    top_y = int(h * 0.6)
+    pts   = np.array([[
+        (_roi_state[0], h),
+        (_roi_state[1], h),
+        (_roi_state[3], top_y),
+        (_roi_state[2], top_y)
+    ]], dtype=np.int32)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, pts, 255)
+    return mask
+
+
+def _make_coordinates(image, line_parameters):
+    slope, intercept = line_parameters
+    if abs(slope) < 1e-3:
+        return None
+    y1 = image.shape[0]
+    y2 = int(y1 * 0.45)
+    x1 = int((y1 - intercept) / slope)
+    x2 = int((y2 - intercept) / slope)
+    return np.array([x1, y1, x2, y2])
+
+
+def _average_slope_intercept(image, lines):
+    """
+    Averages Hough lines into one left and one right lane line.
+    Filters near-horizontal lines (slope < 0.5).
+    Applies temporal smoothing: 20% new + 80% previous.
+    """
+    global _prev_left_fit_avg, _prev_right_fit_avg
+
+    left_fit  = []
+    right_fit = []
+
+    if lines is not None:
+        for l in lines:
+            x1, y1, x2, y2 = l.reshape(4)
+            parameters = np.polyfit((x1, x2), (y1, y2), 1)
+            slope      = parameters[0]
+            intercept  = parameters[1]
+
+            if abs(slope) < 0.5:
+                continue
+
+            x_at_bottom = int((image.shape[0] - intercept) / slope)
+
+            if slope < 0 and x_at_bottom < image.shape[1] // 2:
+                left_fit.append((slope, intercept))
+            elif slope > 0 and x_at_bottom > image.shape[1] // 2:
+                right_fit.append((slope, intercept))
+
+    left_fit_average  = _prev_left_fit_avg
+    right_fit_average = _prev_right_fit_avg
+
+    if len(left_fit) > 0:
+        current = np.average(left_fit, axis=0)
+        left_fit_average = (
+            0.2 * current + 0.8 * _prev_left_fit_avg
+            if _prev_left_fit_avg is not None else current
+        )
+
+    if len(right_fit) > 0:
+        current = np.average(right_fit, axis=0)
+        right_fit_average = (
+            0.2 * current + 0.8 * _prev_right_fit_avg
+            if _prev_right_fit_avg is not None else current
+        )
+
+    left_line  = None
+    right_line = None
+
+    if left_fit_average is not None:
+        left_line = _make_coordinates(image, left_fit_average)
+        _prev_left_fit_avg = left_fit_average
+
+    if right_fit_average is not None:
+        right_line = _make_coordinates(image, right_fit_average)
+        _prev_right_fit_avg = right_fit_average
+
+    return left_line, right_line
+
+
+def _display_lanes(image, left_line, right_line):
+    """Fills the polygon between left and right lane lines."""
+    line_image = np.zeros_like(image)
+
+    if left_line is not None and right_line is not None:
+        lx1, ly1, lx2, ly2 = left_line
+        rx1, ry1, rx2, ry2 = right_line
+        pts = np.array([[
+            (int(lx1), int(ly1)),
+            (int(lx2), int(ly2)),
+            (int(rx2), int(ry2)),
+            (int(rx1), int(ry1))
+        ]], dtype=np.int32)
+        cv2.fillPoly(line_image, pts, (255, 0, 100))
+    elif left_line is not None:
+        lx1, ly1, lx2, ly2 = left_line
+        cv2.line(line_image, (int(lx1), int(ly1)), (int(lx2), int(ly2)), (255, 0, 100), 8)
+    elif right_line is not None:
+        rx1, ry1, rx2, ry2 = right_line
+        cv2.line(line_image, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (255, 0, 100), 8)
+
+    return line_image
+
+
 def run_lane_pipeline(frame):
-    img      = frame.copy()
+    """
+    Wrapper integrating Ayesha's adaptive CCA ROI lane detection.
+    Returns: (annotated_frame, lane_center_offset)
+        offset > 0  → lane center is RIGHT of frame center → steer right
+        offset < 0  → lane center is LEFT of frame center  → steer left
+        offset None → lanes not detected this frame
+    """
+    img    = frame.copy()
     height, width = img.shape[:2]
     midpoint = width // 2
 
-    edges = cv2.Canny(
-        cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (9, 9), 0),
-        70, 100
-    )
+    # Canny edges
+    cannied = _canny(img)
 
-    mask    = np.zeros_like(edges)
-    pts_roi = np.array([[
-        (int(width * 0.05), height),
-        (int(width * 0.95), height),
-        (int(width * 0.65), int(height * 0.40)),
-        (int(width * 0.35), int(height * 0.40))
-    ]], dtype=np.int32)
-    cv2.fillPoly(mask, pts_roi, 255)
-    roi = cv2.bitwise_and(edges, edges, mask=mask)
+    # Adaptive CCA-based ROI
+    adaptive_mask = _adaptive_roi_cca(cannied, img.shape)
+    roi_image     = cv2.bitwise_and(cannied, adaptive_mask)
 
-    roi_bottom = roi[int(height * 0.5):, :]
-    y_left,  x_left  = np.where(roi_bottom[:, :midpoint] > 0)
-    y_right, x_right = np.where(roi_bottom[:, midpoint:] > 0)
+    # Hough lines
+    lines = cv2.HoughLinesP(roi_image, 2, np.pi / 180, 50,
+                            np.array([]), minLineLength=20, maxLineGap=100)
 
-    y_left  = y_left  + int(height * 0.5)
-    y_right = y_right + int(height * 0.5)
+    # Average and smooth lines
+    left_line, right_line = _average_slope_intercept(img, lines)
 
-    def filter_points(x, y, midpoint, height):
-        if len(x) == 0:
-            return np.array([]), np.array([])
-        slope_mask = np.array([
-            abs(yi - height) / (abs(xi - midpoint) + 1e-5) > 0.4
-            for xi, yi in zip(x, y)
-        ])
-        x, y = x[slope_mask], y[slope_mask]
-        if len(x) == 0:
-            return np.array([]), np.array([])
-        median_x, std_x = np.median(x), np.std(x)
-        stat_mask = np.abs(x - median_x) < 1.5 * std_x
-        return x[stat_mask], y[stat_mask]
+    # Draw lane fill
+    line_image = _display_lanes(img, left_line, right_line)
+    annotated  = cv2.addWeighted(img, 0.9, line_image, 1, 1)
 
-    x_left,  y_left  = filter_points(x_left,  y_left,  midpoint, height)
-    x_right, y_right = filter_points(x_right, y_right, midpoint, height)
+    # Calculate lane center offset for steering
+    lane_center_offset = None
+    if left_line is not None and right_line is not None:
+        # x at bottom of frame for each line
+        left_x_bottom  = left_line[0]
+        right_x_bottom = right_line[0]
+        lane_center        = (left_x_bottom + right_x_bottom) // 2
+        lane_center_offset = lane_center - midpoint
 
-    line_image     = np.zeros_like(img)
-    left_x_bottom  = None
-    right_x_bottom = None
-    plot_y         = np.linspace(height // 2, height - 1, 50)
+        # Draw center indicators
+        cv2.line(annotated, (lane_center, height - 20), (lane_center, height - 80), (0, 255, 255), 3)
+        cv2.line(annotated, (midpoint,    height - 20), (midpoint,    height - 80), (255, 255,  0), 3)
 
-    if len(x_left) > 50:
-        degree    = 2 if len(x_left) > 200 else 1
-        left_func = np.poly1d(np.polyfit(y_left, x_left, degree))
-        left_x_bottom = int(left_func(height - 1))
-        pts = np.array([np.transpose(np.vstack([left_func(plot_y), plot_y]))], np.int32)
-        cv2.polylines(line_image, pts, False, (0, 255, 0), 6)
+    if lane_center_offset is not None and abs(lane_center_offset) > int(width * 0.40):
+        lane_center_offset = None  # too extreme, likely a detection error
 
-    if len(x_right) > 50:
-        degree     = 2 if len(x_right) > 200 else 1
-        right_func = np.poly1d(np.polyfit(y_right, x_right, degree))
-        right_x_bottom = int(right_func(height - 1) + midpoint)
-        pts = np.array([np.transpose(np.vstack([right_func(plot_y) + midpoint, plot_y]))], np.int32)
-        cv2.polylines(line_image, pts, False, (0, 255, 0), 6)
-
-    lane_center_offset = (
-        (left_x_bottom + right_x_bottom) // 2 - midpoint
-        if left_x_bottom is not None and right_x_bottom is not None
-        else None
-    )
-
-    return cv2.addWeighted(img, 1, line_image, 1, 0), lane_center_offset
+    return annotated, lane_center_offset
 
 # DECISION ENGINE
-
 def make_decision(barrier_detected, yolo_detections, lane_center_offset):
     if barrier_detected:
         return "STOP - BARRIER", (0, 0, 255)
@@ -189,54 +335,56 @@ def make_decision(barrier_detected, yolo_detections, lane_center_offset):
             return "TURN LEFT", (0, 165, 255)
     return "FORWARD", (0, 255, 0)
 
-
 # DISPLAY OVERLAY
-
 def draw_overlay(frame, decision, decision_color, fps, yolo_detections, lane_center_offset):
     h, w = frame.shape[:2]
+
     cv2.rectangle(frame, (0, 0), (w, 50), (20, 20, 20), -1)
-    cv2.putText(frame, f"FPS: {fps:.1f}", (15, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+    cv2.putText(frame, f"FPS: {fps:.1f}", (15, 33),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
     text_size = cv2.getTextSize(decision, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-    start_x = (w - (text_size[0] + 35)) // 2
+    start_x   = (w - (text_size[0] + 35)) // 2
     cv2.circle(frame, (start_x + 12, 25), 10, decision_color, -1)
-    cv2.putText(frame, decision, (start_x + 37, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
-    cv2.putText(frame, decision, (start_x + 35, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.8, decision_color, 2)
+    cv2.putText(frame, decision, (start_x + 37, 35),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
+    cv2.putText(frame, decision, (start_x + 35, 33),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, decision_color, 2)
 
     cv2.rectangle(frame, (0, h - 50), (w, h), (20, 20, 20), -1)
     offset_text = f"OFFSET: {lane_center_offset:+d}px" if lane_center_offset is not None else "LANE: N/A"
-    cv2.putText(frame, offset_text, (15, h - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-    obj_text = f"OBJECTS: {len(yolo_detections)}"
-    cv2.putText(frame, obj_text, (w - 180, h - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+    cv2.putText(frame, offset_text, (15, h - 17),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+    cv2.putText(frame, f"OBJECTS: {len(yolo_detections)}", (w - 180, h - 17),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
     cx, cy = w // 2, h - 25
     if "FORWARD" in decision:
-        pts = np.array([[cx, cy-15], [cx-12, cy+10], [cx+12, cy+10]], np.int32)
+        pts = np.array([[cx, cy - 15], [cx - 12, cy + 10], [cx + 12, cy + 10]], np.int32)
         cv2.fillPoly(frame, [pts], decision_color)
     elif "RIGHT" in decision:
-        pts = np.array([[cx+15, cy], [cx-10, cy-12], [cx-10, cy+12]], np.int32)
+        pts = np.array([[cx + 15, cy], [cx - 10, cy - 12], [cx - 10, cy + 12]], np.int32)
         cv2.fillPoly(frame, [pts], decision_color)
     elif "LEFT" in decision:
-        pts = np.array([[cx-15, cy], [cx+10, cy-12], [cx+10, cy+12]], np.int32)
+        pts = np.array([[cx - 15, cy], [cx + 10, cy - 12], [cx + 10, cy + 12]], np.int32)
         cv2.fillPoly(frame, [pts], decision_color)
     elif "STOP" in decision:
-        cv2.rectangle(frame, (cx-12, cy-12), (cx+12, cy+12), decision_color, -1)
+        cv2.rectangle(frame, (cx - 12, cy - 12), (cx + 12, cy + 12), decision_color, -1)
 
     if "BARRIER" in decision:
-        cv2.rectangle(frame, (w//2 - 220, 80), (w//2 + 220, 140), (0, 0, 255), -1)
-        cv2.putText(frame, "!!! BARRIER DETECTED !!!", (w//2 - 195, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+        cv2.rectangle(frame, (w // 2 - 220, 80), (w // 2 + 220, 140), (0, 0, 255), -1)
+        cv2.putText(frame, "!!! BARRIER DETECTED !!!", (w // 2 - 195, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
     return frame
 
-
 # MAIN PIPELINE
-
 def process_video(video_path, filename):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  Could not open {filename}, skipping.")
         return
 
-    # FIX 4: use source FPS, not hardcoded 30
     fps_source = int(cap.get(cv2.CAP_PROP_FPS)) or 30
     out = cv2.VideoWriter(
         os.path.join(OUTPUT_FOLDER, f"processed_{filename}"),
@@ -247,7 +395,10 @@ def process_video(video_path, filename):
 
     frame_count     = 0
     prev_time       = time.time()
-    needs_darkening = False   # FIX 1: exposure state lives here
+    needs_darkening = False
+
+    # Reset Ayesha's lane state for each new video
+    _reset_lane_state()
 
     print(f"  Processing: {filename}")
 
@@ -260,7 +411,7 @@ def process_video(video_path, filename):
             frame        = cv2.resize(frame, (1280, 720))
             frame_count += 1
 
-            # FIX 1: brightness check every 15 frames — cheap, matches Shaheer's original
+            # Brightness check every 15 frames
             if frame_count % 15 == 0:
                 tiny_frame      = cv2.resize(frame, (64, 64))
                 gray_tiny       = cv2.cvtColor(tiny_frame, cv2.COLOR_BGR2GRAY)
@@ -315,5 +466,5 @@ if __name__ == "__main__":
         print(f"Found {len(v_files)} video(s).\n")
         for vid in v_files:
             process_video(os.path.join(VIDEO_FOLDER, vid), vid)
-        # FIX 5: destroyAllWindows after ALL videos done, not inside each one
         cv2.destroyAllWindows()
+        print("\nAll done.")
