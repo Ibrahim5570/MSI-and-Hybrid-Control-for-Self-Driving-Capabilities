@@ -85,8 +85,7 @@ def run_classical_pipeline(frame, needs_darkening):
             cv2.drawContours(clean_mask, [cnt], -1, 255, -1)
 
     edges = cv2.Canny(clean_mask, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50,
-                            minLineLength=150, maxLineGap=100)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=150, maxLineGap=100)
 
     barrier_detected, barrier_line = False, None
     if lines is not None:
@@ -102,17 +101,13 @@ def run_classical_pipeline(frame, needs_darkening):
 
 # LANE DETECTION PIPELINE (Thread 3)
 
-# --- Global state for lane smoothing and adaptive ROI ---
-# Kept as module-level variables as per Ayesha's design.
-# _reset_lane_state() is called between videos to prevent bleed-over.
-
 _prev_left_fit_avg  = None
 _prev_right_fit_avg = None
 _roi_state          = None
 
 
 def _reset_lane_state():
-    """Call between videos to clear smoothing and ROI state."""
+    """Called between videos to clear smoothing and ROI state."""
     global _prev_left_fit_avg, _prev_right_fit_avg, _roi_state
     _prev_left_fit_avg  = None
     _prev_right_fit_avg = None
@@ -126,11 +121,6 @@ def _canny(image):
 
 
 def _adaptive_roi_cca(edge_image, original_shape):
-    """
-    Ayesha's CCA-based adaptive ROI.
-    Finds edge components on left/right sides and builds a trapezoid around them.
-    Downscales 4x for performance, then smooths coordinates over time.
-    """
     global _roi_state
     h, w = original_shape[:2]
 
@@ -192,11 +182,6 @@ def _make_coordinates(image, line_parameters):
 
 
 def _average_slope_intercept(image, lines):
-    """
-    Averages Hough lines into one left and one right lane line.
-    Filters near-horizontal lines (slope < 0.5).
-    Applies temporal smoothing: 20% new + 80% previous.
-    """
     global _prev_left_fit_avg, _prev_right_fit_avg
 
     left_fit  = []
@@ -251,7 +236,6 @@ def _average_slope_intercept(image, lines):
 
 
 def _display_lanes(image, left_line, right_line):
-    """Fills the polygon between left and right lane lines."""
     line_image = np.zeros_like(image)
 
     if left_line is not None and right_line is not None:
@@ -275,13 +259,7 @@ def _display_lanes(image, left_line, right_line):
 
 
 def run_lane_pipeline(frame):
-    """
-    Wrapper integrating Ayesha's adaptive CCA ROI lane detection.
-    Returns: (annotated_frame, lane_center_offset)
-        offset > 0  → lane center is RIGHT of frame center → steer right
-        offset < 0  → lane center is LEFT of frame center  → steer left
-        offset None → lanes not detected this frame
-    """
+
     img    = frame.copy()
     height, width = img.shape[:2]
     midpoint = width // 2
@@ -397,7 +375,7 @@ def process_video(video_path, filename):
     prev_time       = time.time()
     needs_darkening = False
 
-    # Reset Ayesha's lane state for each new video
+    # Reset lane state
     _reset_lane_state()
 
     print(f"  Processing: {filename}")
@@ -467,4 +445,4 @@ if __name__ == "__main__":
         for vid in v_files:
             process_video(os.path.join(VIDEO_FOLDER, vid), vid)
         cv2.destroyAllWindows()
-        print("\nAll done.")
+        print("\nDone.")
