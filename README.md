@@ -185,3 +185,14 @@ Priority order (highest to lowest):
 - [1] ksakmann, *Canny-Edge-Lane-Line-Detector*, GitHub, 2017. https://github.com/ksakmann/Canny-Edge-Lane-Line-Detector
 - [2] mbshbn, *Lane-Line-Detection-using-color-transform-and-gradient*, GitHub. https://github.com/mbshbn/Lane-Line-Detection-using-color-transform-and-gradient
 - [3] Ultralytics, *YOLOv8*, https://github.com/ultralytics/ultralytics
+
+---
+
+## Team
+
+| Member | Module |
+|---|---|
+| Group Leader | Integration, Decision Engine |
+| Shaheer | YOLO Object Detection, Barrier Detection |
+| Ayesha | Lane Detection |
+| Aleeza | Display Overlay, Report |
