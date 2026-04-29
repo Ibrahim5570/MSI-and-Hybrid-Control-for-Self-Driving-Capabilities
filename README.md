@@ -192,7 +192,7 @@ Priority order (highest to lowest):
 
 | Member | Module |
 |---|---|
-| Group Leader | Integration, Decision Engine |
+| Group Leader (Me) | Integration, Decision Engine |
 | Shaheer | YOLO Object Detection, Barrier Detection |
 | Ayesha | Lane Detection |
 | Aleeza | Display Overlay, Report |
