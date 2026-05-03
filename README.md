@@ -19,41 +19,9 @@ A hybrid classical + deep learning self-driving pipeline that processes real cam
 
 ---
 
-## System Architecture
+## Pipeline Flow Diagram
 
-```
-Input Video (.mp4)
-       │
-       ▼
-┌──────────────────────────────────────────┐
-│              Frame Processor             │
-│                                          │
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │  Thread 1   │  │    Thread 2     │   │
-│  │    YOLO     │  │  Classical CV   │   │
-│  │  (Objects)  │  │   (Barrier)     │   │
-│  └──────┬──────┘  └───────┬─────────┘   │
-│         │                 │             │
-│         └────────┬────────┘             │
-│                  │                      │
-│          ┌───────▼──────┐               │
-│          │   Thread 3   │               │
-│          │     Lane     │               │
-│          │  Detection   │               │
-│          └───────┬──────┘               │
-└──────────────────┼───────────────────── ┘
-                   │
-                   ▼
-           Decision Engine
-     (Barrier > Obstacle > Lane > Forward)
-                   │
-                   ▼
-           Display Overlay
-     (FPS / Decision / Arrow / Offset)
-                   │
-                   ▼
-         Output Window + Saved MP4
-```
+![Pipeline Flow Diagram](docs/diagrams/pipeline_flow_diagram.jpg)
 
 ---
 
