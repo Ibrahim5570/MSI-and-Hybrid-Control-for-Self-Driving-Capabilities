@@ -19,41 +19,9 @@ A hybrid classical + deep learning self-driving pipeline that processes real cam
 
 ---
 
-## System Architecture
+## Pipeline Flow Diagram
 
-```
-Input Video (.mp4)
-       │
-       ▼
-┌──────────────────────────────────────────┐
-│              Frame Processor             │
-│                                          │
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │  Thread 1   │  │    Thread 2     │   │
-│  │    YOLO     │  │  Classical CV   │   │
-│  │  (Objects)  │  │   (Barrier)     │   │
-│  └──────┬──────┘  └───────┬─────────┘   │
-│         │                 │             │
-│         └────────┬────────┘             │
-│                  │                      │
-│          ┌───────▼──────┐               │
-│          │   Thread 3   │               │
-│          │     Lane     │               │
-│          │  Detection   │               │
-│          └───────┬──────┘               │
-└──────────────────┼───────────────────── ┘
-                   │
-                   ▼
-           Decision Engine
-     (Barrier > Obstacle > Lane > Forward)
-                   │
-                   ▼
-           Display Overlay
-     (FPS / Decision / Arrow / Offset)
-                   │
-                   ▼
-         Output Window + Saved MP4
-```
+![Pipeline Flow Diagram](docs/diagrams/pipeline_flow_diagram.jpg)
 
 ---
 
@@ -87,10 +55,19 @@ Input Video (.mp4)
 ## Project Structure
 
 ```
-├── integration.py          # Main pipeline — run this
-├── backup_lane_detection.py  # Backup lane module (cited sources)
-├── DIP Project Videos/     # Input .mp4 files go here
-└── output_videos/          # Processed output videos saved here
+├── docs/                                     # Documentation
+|    ├── diagrams                             # Diagrams
+|    |    ├── pipeline_flow_diagram.drawio    # Editable pipeline flow diagram
+|    |    └── pipeline_flow_diagram.jpg       # Previw of pipeline flow diagram
+|    ├── hybrid_cv_documentation.docx         # Object detection logic
+|    └── project_report.pdf                   # Full project report
+├── separate works/                           # Separate files with the individual works of each member
+|    ├── objectDetection.ipynb                # Object detection logic
+|    └── project_lane_detection.py            # Lane detection logic
+├── integration.py                            # Main pipeline — run this
+├── requirements.txt                          # List of required libraries
+├── yolov8n.pt
+└── README.md                                 # This file
 ```
 
 ---
@@ -107,7 +84,7 @@ pip install opencv-python numpy ultralytics
 
 ## Usage
 
-1. Place your `.mp4` video files inside the `DIP Project Videos/` folder
+1. Place your `.mp4` video files inside the `DIP Project Videos/` folder (the videos used for demonstration are available [here](https://drive.google.com/file/d/1dJYyjc6u08ob8WTFlGNBBppujia_SzGz/view?usp=sharing))
 2. Run the pipeline:
 
 ```bash
@@ -182,9 +159,9 @@ Priority order (highest to lowest):
 
 ## References
 
-- [1] ksakmann, *Canny-Edge-Lane-Line-Detector*, GitHub, 2017. https://github.com/ksakmann/Canny-Edge-Lane-Line-Detector
-- [2] mbshbn, *Lane-Line-Detection-using-color-transform-and-gradient*, GitHub. https://github.com/mbshbn/Lane-Line-Detection-using-color-transform-and-gradient
-- [3] Ultralytics, *YOLOv8*, https://github.com/ultralytics/ultralytics
+- [1] [AdiTOSH. (2026). Quick & Easy Lane Detection with OpenCV and Hough Transform | Python Tutorial (From Scratch). Youtu.be.](https://youtu.be/EYqf6gCwfj0?si=qLbAd8ExfBLzy8og)
+- [2] [ksakmann, *Canny-Edge-Lane-Line-Detector*, GitHub, 2017.](https://github.com/ksakmann/Canny-Edge-Lane-Line-Detector)
+- [3] [mbshbn, *Lane-Line-Detection-using-color-transform-and-gradient*, GitHub.](https://github.com/mbshbn/Lane-Line-Detection-using-color-transform-and-gradient)
 
 ---
 
@@ -192,7 +169,7 @@ Priority order (highest to lowest):
 
 | Member | Module |
 |---|---|
-| Group Leader (Me) | Integration, Decision Engine |
+| Ibrahim Abdullah (Group Leader) | Integration, Decision Engine |
 | Shaheer | YOLO Object Detection, Barrier Detection |
 | Ayesha | Lane Detection |
 | Aleeza | Display Overlay, Report |
